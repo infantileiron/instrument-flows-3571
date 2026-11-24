@@ -52,6 +52,32 @@ function reportBody(report, familyCode = '') {
       `<div class="net-foot"><span>守恒差额</span><strong>${scope.net_total}</strong></div>`)}</div>${pairs(report, familyCode)}`;
 }
 
+function reconcile(report) {
+  const reversals = report.reversals || [];
+  if (!reversals.length) return '';
+  const picker = `<label class="filter-label">冲销单号<select id="reconcile">${option('', '选择冲销单号', '')}${reversals.map((item, index) => option(index, `${item.reference} · ${item.effective_on}`)).join('')}</select></label>`;
+  return section('冲销对账', '按冲销单号核对每张原签领的扣减件数；跨器材族的行只验签不计入本矩阵。',
+    '<div id="reconcile-body"><div class="empty">选择冲销单号后显示该单的扣减明细。</div></div>', picker);
+}
+
+export function reconcileBody(report, index) {
+  const reversal = (report.reversals || [])[index];
+  if (!reversal) return '<div class="empty">选择冲销单号后显示该单的扣减明细。</div>';
+  const halls = Object.fromEntries(report.catalog.halls.map(hall => [hall.code, hall.name]));
+  const instruments = Object.fromEntries(report.catalog.instruments.map(item => [item.code, item]));
+  const rows = reversal.lines.map(line => {
+    const instrument = instruments[line.instrument];
+    return `<tr><th scope="row" class="code">${e(line.original_reference)}</th>
+    <td>${e(halls[line.source])}<span class="arrow">→</span>${e(halls[line.destination])}</td>
+    <td>${e(instrument?.name || line.instrument)}</td>
+    <td class="number negative">−${line.quantity} ${e(instrument?.unit || '件')}</td></tr>`;
+  }).join('');
+  const total = reversal.lines.reduce((sum, line) => sum + line.quantity, 0);
+  const footer = `<tr class="matrix-footer"><th scope="row">整单合计</th><td colspan="2">${reversal.lines.length} 张原签领</td>
+    <td class="number">−${total} 件</td></tr>`;
+  return table(['原签领', '出借 → 入借', '器材族', '扣减件数'], rows + footer, '该冲销单没有扣减行。');
+}
+
 export function reportPage() {
   const report = workspace.report;
   if (!report) return lead('净流报告', '核对跨馆调借净额，查看或导出计算快照。') +
@@ -77,7 +103,7 @@ export function reportPage() {
     <p>快照 SHA-256 <span class="code">${e(report.snapshot_hash)}</span></p>
     <details><summary>展开凭据编号</summary><p class="code">${report.receipt_refs.map(e).join('　') || '无'}</p></details>
     ${report.published_at ? `<p>复核席位 <span class="code">${e(report.published_by)}</span>　发布时间（UTC） <span class="code">${e(report.published_at.replace('T', ' '))}</span></p>` : ''}</div>`);
-  return heading + summary + stats + `<div id="report-body">${reportBody(report)}</div>` + lineage;
+  return heading + summary + stats + `<div id="report-body">${reportBody(report)}</div>` + reconcile(report) + lineage;
 }
 
 export function bindReport(refresh) {
@@ -90,6 +116,9 @@ export function bindReport(refresh) {
     document.querySelector('#family').focus();
   });
   swapFamily();
+  document.querySelector('#reconcile')?.addEventListener('change', event => {
+    document.querySelector('#reconcile-body').innerHTML = reconcileBody(report, event.target.value);
+  });
   const action = (selector, handler) => document.querySelector(selector)?.addEventListener('click', async event => {
     const button = event.currentTarget;
     button.disabled = true;

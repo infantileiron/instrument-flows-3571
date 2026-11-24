@@ -93,6 +93,11 @@ tbody tr:hover { background: oklch(96% .019 74); }
 label { display: grid; gap: 6px; font-size: 12px; font-weight: 600; color: var(--muted); }
 input, select { min-height: 37px; width: 100%; min-width: 0; padding: 6px 8px; border: 1px solid var(--line); border-radius: 3px; color: var(--ink); background: var(--card); }
 .form-end { display: grid; gap: 8px; justify-items: start; }
+.lines-box { display: grid; gap: 8px; }
+.line-row { display: grid; grid-template-columns: minmax(0, 1fr) 104px 38px; gap: 8px; align-items: center; }
+.line-row button { min-height: 37px; padding: 4px 0; }
+.line-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.line-actions .hint { color: var(--muted); font-size: 11px; }
 .notice { padding: 10px 15px; margin-bottom: 14px; background: var(--green-light); color: var(--green); border-left: 3px solid var(--green); }
 .empty { background: var(--card); padding: 24px 19px; color: var(--muted); border-top: 1px solid var(--line); }
 .error-panel p { margin-bottom: 12px; }

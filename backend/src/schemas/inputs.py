@@ -30,8 +30,13 @@ class LoanInput(ReceiptInput):
     quantity: int = Field(ge=1, le=500)
 
 
-class ReversalInput(ReceiptInput):
+class ReversalLineInput(Input):
     original_reference: Reference
+    quantity: int = Field(ge=1, le=500)
+
+
+class ReversalInput(ReceiptInput):
+    lines: list[ReversalLineInput] = Field(min_length=1, max_length=50)
 
 
 class PlanInput(Input):

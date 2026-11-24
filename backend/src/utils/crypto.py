@@ -21,10 +21,17 @@ def check_password(password, encoded):
 
 
 def receipt_signature(row):
-    fields = ('reference', 'kind', 'original_id', 'source', 'destination', 'instrument',
-              'quantity', 'effective_on', 'signer', 'note')
-    payload = {field: row[field] for field in fields}
-    payload['effective_on'] = str(payload['effective_on'])
+    if row['kind'] == 'reversal' and row.get('original_id') is None:
+        # 多行冲销单：签名覆盖整单全部扣减行，少一行或改一件都会验签失败
+        payload = {field: row[field] for field in ('reference', 'kind', 'effective_on', 'signer', 'note')}
+        payload['effective_on'] = str(payload['effective_on'])
+        payload['lines'] = [{'original_id': line['original_id'], 'quantity': line['quantity']}
+                            for line in sorted(row['lines'], key=lambda line: line['original_id'])]
+    else:
+        fields = ('reference', 'kind', 'original_id', 'source', 'destination', 'instrument',
+                  'quantity', 'effective_on', 'signer', 'note')
+        payload = {field: row[field] for field in fields}
+        payload['effective_on'] = str(payload['effective_on'])
     return hmac.new(LEDGER_SECRET, canonical(payload).encode(), hashlib.sha256).hexdigest()
 
 

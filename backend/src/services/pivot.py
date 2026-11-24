@@ -12,22 +12,42 @@ class LedgerMismatch(ValueError):
 def calculate(snapshot):
     halls = [item['code'] for item in snapshot['halls']]
     originals = {row['id']: row for row in snapshot['originals']}
+    allowed = {item['code'] for item in snapshot['instruments']}
+    lines_by_reversal = defaultdict(list)
+    consumed = defaultdict(int)
+    for line in snapshot_lines(snapshot):
+        lines_by_reversal[line['reversal_id']].append(line)
+        consumed[line['original_id']] += line['quantity']
+    for original_id, total in consumed.items():
+        original = originals.get(original_id)
+        if not original or original['kind'] != ReceiptKind.LOAN or not signed(original):
+            raise LedgerMismatch('冲销引用的原签领缺失或签名失效')
+        if total > original['quantity']:
+            raise LedgerMismatch(f'{original["reference"]} 的冲销合计 {total} 件超过签领 {original["quantity"]} 件')
+
     signed_events = defaultdict(lambda: [0, 0])
-    reversals = set()
     for row in snapshot['receipts']:
-        if not signed(row):
+        if row['kind'] == ReceiptKind.LOAN:
+            if not signed(row):
+                raise LedgerMismatch(f'{row["reference"]} 的签名校验失败')
+            if row['instrument'] in allowed:
+                signed_events[row['instrument'], row['source'], row['destination']][0] += row['quantity']
+            continue
+        lines = sorted(lines_by_reversal.get(row['id'], []), key=lambda line: line['id'])
+        if not lines:
+            raise LedgerMismatch(f'{row["reference"]} 缺少扣减明细')
+        if not signed({**row, 'lines': lines}):
             raise LedgerMismatch(f'{row["reference"]} 的签名校验失败')
-        is_reversal = row['kind'] == ReceiptKind.REVERSAL
-        if is_reversal:
-            original = originals.get(row['original_id'])
-            route_fields = ('source', 'destination', 'instrument', 'quantity')
+        for line in lines:
+            original = originals.get(line['original_id'])
             if (not original or original['kind'] != ReceiptKind.LOAN or not signed(original)
-                    or original['effective_on'] > row['effective_on'] or original['id'] in reversals
-                    or any(original[field] != row[field] for field in route_fields)):
+                    or original['effective_on'] > row['effective_on']):
                 raise LedgerMismatch(f'{row["reference"]} 与原签领无法配对')
-            reversals.add(original['id'])
-        direction = (row['instrument'], row['source'], row['destination'])
-        signed_events[direction][int(is_reversal)] += row['quantity']
+            if row.get('original_id') is not None and any(
+                    row[field] != original[field] for field in ('source', 'destination', 'instrument', 'quantity')):
+                raise LedgerMismatch(f'{row["reference"]} 与原签领无法配对')
+            if original['instrument'] in allowed:
+                signed_events[original['instrument'], original['source'], original['destination']][1] += line['quantity']
 
     families = {}
     aggregate = matrix(halls)
@@ -61,6 +81,15 @@ def calculate(snapshot):
     if not result['verified']:
         raise LedgerMismatch('签名净额与矩阵边际不守恒')
     return result
+
+
+def snapshot_lines(snapshot):
+    if 'lines' in snapshot:
+        return snapshot['lines']
+    # 旧版快照：一单一行全额冲销，折合成扣减行按同一口径核验
+    return [{'id': row['id'], 'reversal_id': row['id'], 'original_id': row['original_id'],
+             'quantity': row['quantity']}
+            for row in snapshot['receipts'] if row['kind'] == ReceiptKind.REVERSAL]
 
 
 def matrix(halls):

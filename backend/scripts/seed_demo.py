@@ -1,7 +1,7 @@
 import json
 
 from scripts.fixtures import HALLS, INSTRUMENTS, LOANS, REVERSALS, SERIES, USERS
-from src.models.db import one, transaction
+from src.models.db import one, rows, transaction
 from src.services.ledger import insert
 from src.services.pivot import calculate
 from src.services.plans import snapshot_for
@@ -19,10 +19,22 @@ def seed(cursor):
         insert(cursor, dict(reference=reference, effective_on=effective_on, source=source, destination=destination,
                             instrument=instrument, quantity=quantity, note=note, kind='loan', original_id=None,
                             signer='analyst'), seed=True)
-    for reference, effective_on, original, note in REVERSALS:
-        row = one(cursor, 'SELECT id,source,destination,instrument,quantity FROM receipts WHERE reference=%s', (original,))
+    for reference, effective_on, lines, note in REVERSALS:
+        marks = ','.join(['%s'] * len(lines))
+        originals = {row['reference']: row for row in rows(
+            cursor, f'SELECT id,reference FROM receipts WHERE reference IN ({marks})',
+            [original for original, _ in lines])}
+        line_rows = [{'original_id': originals[original]['id'], 'quantity': quantity}
+                     for original, quantity in lines]
         insert(cursor, dict(reference=reference, effective_on=effective_on, note=note, kind='reversal',
-                            original_id=row.pop('id'), signer='analyst', **row), seed=True)
+                            original_id=None, source=None, destination=None, instrument=None, quantity=None,
+                            signer='analyst', lines=line_rows), seed=True)
+        reversal_id = one(cursor, 'SELECT id FROM receipts WHERE reference=%s', (reference,))['id']
+        for line in line_rows:
+            cursor.execute('''INSERT INTO reversal_lines(reversal_id,original_id,quantity)
+                SELECT %s,%s,%s FROM DUAL WHERE NOT EXISTS
+                (SELECT 1 FROM reversal_lines WHERE reversal_id=%s AND original_id=%s)''',
+                (reversal_id, line['original_id'], line['quantity'], reversal_id, line['original_id']))
     cursor.execute('''INSERT INTO plans(series,version,start_on,end_on,created_by)
         VALUES (%s,1,'2026-11-02','2026-11-15','analyst') ON DUPLICATE KEY UPDATE id=id''', (SERIES,))
     if not one(cursor, "SELECT id FROM runs WHERE seed_key='november-baseline'"):
@@ -35,7 +47,7 @@ def seed(cursor):
                        (plan['id'], snapshot_json, canonical(result)))
         save_report(cursor.lastrowid, snapshot, result)
     counts = {table: one(cursor, f'SELECT COUNT(*) AS count FROM {table}')['count'] for table in
-              ('users', 'halls', 'instruments', 'receipts', 'plans', 'runs', 'audit_log')}
+              ('users', 'halls', 'instruments', 'receipts', 'reversal_lines', 'plans', 'runs', 'audit_log')}
     print(canonical(counts))
 
 

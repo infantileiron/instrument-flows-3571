@@ -1,9 +1,10 @@
 import hashlib
 import json
+from collections import defaultdict
 
 from fastapi import HTTPException
 
-from src.constants.domain import Role, RunStatus
+from src.constants.domain import ReceiptKind, Role, RunStatus
 from src.models.db import one, rows
 from src.services.catalog import audit, catalog
 from src.utils.crypto import canonical
@@ -22,15 +23,30 @@ def add_plan(cursor, data, user):
 
 
 def snapshot_for(cursor, plan):
-    scope = 'effective_on BETWEEN %s AND %s AND (%s IS NULL OR instrument=%s)'
-    params = (plan['start_on'], plan['end_on'], plan['instrument'], plan['instrument'])
-    receipts = rows(cursor, f'SELECT * FROM receipts WHERE {scope} ORDER BY id', params)
-    originals = rows(cursor, f'''SELECT o.* FROM receipts o JOIN (
-        SELECT original_id FROM receipts WHERE {scope} AND original_id IS NOT NULL
-        ) r ON r.original_id=o.id ORDER BY o.id''', params)
-    snapshot = {**catalog(cursor), 'receipts': receipts, 'originals': originals}
-    if plan['instrument']:
-        snapshot['instruments'] = [item for item in snapshot['instruments'] if item['code'] == plan['instrument']]
+    start, end, instrument = plan['start_on'], plan['end_on'], plan['instrument']
+    loans = rows(cursor, '''SELECT * FROM receipts WHERE kind='loan'
+        AND effective_on BETWEEN %s AND %s AND (%s IS NULL OR instrument=%s) ORDER BY id''',
+        (start, end, instrument, instrument))
+    reversals = rows(cursor, '''SELECT DISTINCT r.* FROM receipts r
+        LEFT JOIN reversal_lines l ON l.reversal_id=r.id LEFT JOIN receipts o ON o.id=l.original_id
+        WHERE r.kind='reversal' AND r.effective_on BETWEEN %s AND %s
+        AND (%s IS NULL OR o.instrument=%s OR l.id IS NULL)
+        ORDER BY r.id''', (start, end, instrument, instrument))
+    lines, originals = [], []
+    if reversals:
+        marks = ','.join(['%s'] * len(reversals))
+        referenced = rows(cursor, f'''SELECT DISTINCT original_id FROM reversal_lines
+            WHERE reversal_id IN ({marks})''', [row['id'] for row in reversals])
+        original_ids = sorted(line['original_id'] for line in referenced)
+        marks = ','.join(['%s'] * len(original_ids))
+        originals = rows(cursor, f'SELECT * FROM receipts WHERE id IN ({marks}) ORDER BY id', original_ids)
+        # 同一原单在周期外的冲销行也一并冻结，用于整单与累计件数核验
+        lines = rows(cursor, f'SELECT * FROM reversal_lines WHERE original_id IN ({marks}) ORDER BY id',
+                     original_ids)
+    receipts = sorted(loans + reversals, key=lambda row: row['id'])
+    snapshot = {**catalog(cursor), 'receipts': receipts, 'lines': lines, 'originals': originals}
+    if instrument:
+        snapshot['instruments'] = [item for item in snapshot['instruments'] if item['code'] == instrument]
     return canonical(snapshot)
 
 
@@ -57,6 +73,36 @@ def list_runs(cursor, user):
         {visibility} ORDER BY r.id DESC LIMIT 100''')
 
 
+def reversal_details(snapshot):
+    originals = {row['id']: row for row in snapshot['originals']}
+    details = []
+    if 'lines' in snapshot:
+        by_reversal = defaultdict(list)
+        for line in snapshot['lines']:
+            by_reversal[line['reversal_id']].append(line)
+        for row in snapshot['receipts']:
+            if row['kind'] != ReceiptKind.REVERSAL:
+                continue
+            lines = []
+            for line in by_reversal.get(row['id'], []):
+                original = originals.get(line['original_id'], {})
+                lines.append({'original_reference': original.get('reference', '—'),
+                              'source': original.get('source'), 'destination': original.get('destination'),
+                              'instrument': original.get('instrument'), 'quantity': line['quantity']})
+            details.append({'reference': row['reference'], 'effective_on': row['effective_on'], 'lines': lines})
+    else:
+        # 旧版快照：一单一行全额冲销
+        for row in snapshot['receipts']:
+            if row['kind'] != ReceiptKind.REVERSAL:
+                continue
+            original = originals.get(row['original_id'], {})
+            details.append({'reference': row['reference'], 'effective_on': row['effective_on'],
+                            'lines': [{'original_reference': original.get('reference', '—'),
+                                       'source': row['source'], 'destination': row['destination'],
+                                       'instrument': row['instrument'], 'quantity': row['quantity']}]})
+    return details
+
+
 def get_run(cursor, run_id, user):
     run = one(cursor, f'''SELECT {RUN_FIELDS}, r.snapshot, r.result FROM runs r
         JOIN plans p ON p.id=r.plan_id WHERE r.id=%s''', (run_id,))
@@ -66,6 +112,7 @@ def get_run(cursor, run_id, user):
     run['snapshot_hash'] = hashlib.sha256(canonical(snapshot).encode()).hexdigest()
     run['catalog'] = {key: snapshot[key] for key in ('halls', 'instruments')}
     run['receipt_refs'] = [row['reference'] for row in snapshot['receipts']]
+    run['reversals'] = reversal_details(snapshot)
     run['result'] = json.loads(run['result']) if run['result'] else None
     return run, snapshot
 
